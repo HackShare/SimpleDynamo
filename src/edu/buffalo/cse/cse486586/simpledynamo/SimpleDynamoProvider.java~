@@ -1,0 +1,565 @@
+package edu.buffalo.cse.cse486586.simpledynamo;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.OptionalDataException;
+import java.io.StreamCorruptedException;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Formatter;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.Vector;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.Context;
+import android.database.Cursor;
+import android.database.MatrixCursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.net.Uri;
+import android.os.AsyncTask;
+import android.telephony.TelephonyManager;
+import android.util.Log;
+
+public class SimpleDynamoProvider extends ContentProvider {
+int SERVER_PORT=10000;
+String myHash;
+String myport;
+String successor1;
+String successor2;
+String Columns[]={"key","value"};
+int algo=SQLiteDatabase.CONFLICT_REPLACE;
+private volatile Vector<SerialCursorRow>answerCursor;
+private HashMap<String,String>insertMap;
+private Vector <String> Count;
+private int Sum=0;
+final String []avd_no={"5562","5556","5554","5558","5560"};
+TreeMap <String,String>neighborMap;
+public static MessageStore messagesdb;
+public static SQLiteDatabase db;
+final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
+ClientTask ct;
+Uri mUri;
+
+	@Override
+	public int delete(Uri uri, String selection, String[] selectionArgs) {
+		   return db.delete("Messages","1", selectionArgs);
+	       }
+	       
+	@Override
+	public String getType(Uri uri) {
+		// TODO Auto-generated method stub
+		return null;
+	}
+
+	String isCoordinator(String key){
+	String hashKey="";
+	try {
+		hashKey = genHash(key);
+	} catch (NoSuchAlgorithmException e) {
+		// TODO Auto-generated catch block
+		e.printStackTrace();
+	}
+	String destHash=neighborMap.ceilingKey(hashKey);
+	if (destHash==null)destHash=neighborMap.firstKey();
+	Log.e("AVD",destHash+" "+neighborMap.get(destHash));
+	return neighborMap.get(destHash);
+	}
+		
+	
+	@Override	
+	public Uri insert(Uri uri, ContentValues values) {
+	String key=values.getAsString("key");
+	String dest=isCoordinator(key);
+	Log.e("ToInsert",key);
+	if (dest.equals(myport)){
+	rwl.writeLock().lock();
+	insertMap.put(values.getAsString("key"), values.getAsString("values"));
+	db.insertWithOnConflict("Messages", null, values, algo);
+	rwl.writeLock().unlock();
+	Message msg1=new Message("Insert",myport);
+	msg1.setKeyValue(values.getAsString("key"), values.getAsString("value"));
+	msg1.setDest_port(successor1);	
+	ct.send(msg1);
+	Message msg2=new Message("Insert",myport);
+	msg2.setKeyValue(values.getAsString("key"), values.getAsString("value"));
+	msg2.setDest_port(successor2);
+	ct.send(msg2);
+	Log.e("Inserted",key);
+	}
+	else{
+		Message msg0=new Message("Insert",myport);
+		msg0.setKeyValue(values.getAsString("key"), values.getAsString("value"));
+		msg0.setDest_port(dest);	
+		ct.send(msg0);
+	    Log.e("Insert","Coordinator "+key);
+		String hashavd = "";
+		 for(Map.Entry<String,String> entry: neighborMap.entrySet()){
+	            if(dest.equals(entry.getValue())){
+	                hashavd = (String) entry.getKey();
+	                break; 
+	            }
+	        }
+
+		
+		String succList[]=successor_List(hashavd);
+		Log.e("Successor",succList[0]+" "+succList[1]);
+		
+		
+		if (!succList[0].equals(myport)){
+		Message msg1=new Message("Insert",myport);
+		msg1.setKeyValue(values.getAsString("key"), values.getAsString("value"));
+		msg1.setDest_port(succList[0]);	
+		ct.send(msg1);
+		}
+		else{
+            rwl.writeLock().lock();
+			db.insertWithOnConflict("Messages", null, values,algo);
+			rwl.writeLock().unlock();	
+		}
+		
+		if (!succList[1].equals(myport)){
+		Message msg2=new Message("Insert",myport);
+		msg2.setKeyValue(values.getAsString("key"), values.getAsString("value"));
+		msg2.setDest_port(succList[1]);
+		ct.send(msg2);
+		}
+		else{
+			rwl.writeLock().lock(); 
+			db.insertWithOnConflict("Messages", null, values,algo);
+			rwl.writeLock().unlock();
+		}
+		
+		
+		Log.e("Sent",key);	
+		
+	}
+	return null;
+	}
+
+	@Override
+	public boolean onCreate() {
+		answerCursor= new Vector<SerialCursorRow>();
+   	    Count=new Vector<String>();   
+   	    insertMap=new HashMap<String,String>();
+   	    neighborMap=new TreeMap<String,String>();
+   	    messagesdb=new MessageStore(this.getContext());
+   	    if (messagesdb!=null){
+     	   db=messagesdb.getWritableDatabase();
+     	   db.disableWriteAheadLogging();
+     	   Log.v("create","Database Created");
+     	   
+        }
+        else
+        	return false;
+   	    ct=new ClientTask();
+   	    for (String x:avd_no){
+		  try {
+			neighborMap.put(genHash(x),String.valueOf((Integer.parseInt(x)*2)));
+		} catch (NoSuchAlgorithmException e) {
+			e.printStackTrace();
+		}
+	
+	    }
+   	  try {
+		Setup_Ports();
+		Socket_create();
+	} catch (NumberFormatException e) {
+		// TODO Auto-generated catch block
+		e.printStackTrace();
+	} catch (NoSuchAlgorithmException e) {
+		// TODO Auto-generated catch block
+		e.printStackTrace();
+	}
+	  Log.e("Create","Port-"+myport);
+	  String tmp[]=successor_List(myHash);
+	  successor1=tmp[0];
+	  successor2=tmp[1];
+	  Log.e("Create",successor1+" "+successor2);
+  	  Log.e("Create","Successful");
+  	 return false;
+	}
+
+	private String[] successor_List(String nodeHash){
+		String scr1,scr2;
+		if (nodeHash.equals(neighborMap.lastKey())){
+    		scr1=neighborMap.get(neighborMap.firstKey());
+    		scr2=neighborMap.get(neighborMap.higherKey(neighborMap.firstKey()));
+    	}
+    	else{
+    		if (nodeHash.equals(neighborMap.lowerKey(neighborMap.lastKey()))){
+    			scr1=neighborMap.get(neighborMap.higherKey(nodeHash));
+    	    	scr2=neighborMap.get(neighborMap.firstKey());
+    		}
+    		else{
+    			scr1=neighborMap.get(neighborMap.higherKey(nodeHash));
+    	    	scr2=neighborMap.get(neighborMap.higherKey(neighborMap.higherKey(nodeHash)));
+    	    	
+    		}
+    	}
+		String []s={scr1,scr2};
+		return s;
+	}
+	
+	private void Socket_create() {
+		   try {
+		     	ServerSocket serverSocket = new ServerSocket(SERVER_PORT);
+		         new ServerTask().executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, serverSocket);
+		      } catch (IOException e) 
+		     {
+		     	Log.e("Provider", "Can't create a ServerSocket");
+		         return;
+		     }
+	}
+	
+	private void Setup_Ports() throws NumberFormatException, NoSuchAlgorithmException {
+		TelephonyManager tel = (TelephonyManager)this.getContext().getSystemService(Context.TELEPHONY_SERVICE);
+    	String portStr = tel.getLine1Number().substring(tel.getLine1Number().length() - 4);
+        myport = String.valueOf((Integer.parseInt(portStr) * 2));
+        myHash=genHash(String.valueOf((Integer.parseInt(portStr))));
+		
+	}
+
+	
+	Uri buildUri(String string, String string2) {
+		Uri.Builder uriBuilder = new Uri.Builder();
+  	     uriBuilder.authority(string2);
+  	     uriBuilder.scheme(string);
+  	     return uriBuilder.build();
+	}
+
+	
+	@Override
+	public Cursor query(Uri uri, String[] projection, String selection,
+			String[] selectionArgs, String sortOrder) {
+		if (selection.equals("@")){
+		Cursor queryCursor=db.query("Messages",null,null,null,null,null,null);	
+		Log.e("Query","@");
+		Log.e("Cursorsize", String.valueOf(queryCursor.getCount()));
+        return queryCursor;
+    	}
+		if (selection.equals("*")){
+			Log.e("Query","*");
+			synchronized(answerCursor){
+				answerCursor.clear();
+			}
+			Cursor queryCursor1=db.query("Messages",null,null,null,null,null,null);
+			ArrayList<SerialCursorRow>cursorMap=genList(queryCursor1);
+			synchronized(answerCursor){
+				answerCursor.clear();
+				answerCursor.addAll(cursorMap);
+			}
+		    Message msgq=new Message("Query",myport);
+		    msgq.setDest_port(successor1);
+            msgq.setKey(selection);
+            ct.send(msgq);
+            try {
+            synchronized(answerCursor){
+	    		answerCursor.wait(5000);
+				
+	    		MatrixCursor cr=new MatrixCursor(Columns);
+	    	
+	    		for (int i=0;i<answerCursor.size();i++){
+	    			String []columnValues={answerCursor.get(i).getKey(),answerCursor.get(i).getValue()};
+	    			if (i==answerCursor.size()-1)
+	    			{
+	    				Log.e("Row",answerCursor.get(i).getKey()+answerCursor.get(i).getValue());
+	    			}
+	    			cr.addRow(columnValues);	
+	    			}
+	    	 		answerCursor.clear();
+	    	 		if (cr!=null)Log.e("Cursorsize",String.valueOf(cr.getCount()));
+	    	 		return cr;
+	    }
+            } catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+		
+				
+		String key2=selection;
+		String dest1=isCoordinator(key2);
+		Log.e("Query",selection);
+		if (dest1.equals(myport)){
+			Log.e("Query","Executed");
+			rwl.readLock().lock();
+			Cursor cursor=db.query("Messages", null, "key='"+selection+"'", null, null, null, null);			
+			rwl.readLock().unlock();
+			return cursor;
+		}
+		else{
+			
+			Log.e("Query","Sent to-"+dest1);		
+			MatrixCursor cr=new MatrixCursor(Columns);
+			while(cr.getCount()==0){
+			Message msgq1=new Message("Query",myport);
+			msgq1.setKey(selection);
+			msgq1.setDest_port(dest1);
+			ct.send(msgq1);
+			try {
+			    Log.e("Query","Waiting for Answer");
+				synchronized(answerCursor){
+				answerCursor.wait(3000);
+				int index=answerCursor.indexOf(selection);
+				if (index!=-1){
+				Log.e("Row",answerCursor.get(index).getKey()+answerCursor.get(index).getValue());
+	    		String []columnValues={answerCursor.get(index).getKey(),answerCursor.get(index).getValue()};
+	    		cr.addRow(columnValues);	
+	    		cr.moveToFirst();
+				}
+				
+	    		   	    			
+			}
+			
+			} catch (InterruptedException e) {
+				
+				e.printStackTrace();
+			}
+			}
+			return cr;
+		}
+	}
+
+	private ArrayList<SerialCursorRow> genList(Cursor cr) {
+		ArrayList<SerialCursorRow>cursorMap=new ArrayList<SerialCursorRow>();
+	   	 int keyIndex = cr.getColumnIndex("key");
+			 int valueIndex = cr.getColumnIndex("value");
+			 int count=cr.getCount();
+			 cr.moveToFirst();
+			 for (int i=0;i<count;i++){
+			 SerialCursorRow resultCursor=new SerialCursorRow(cr.getString(keyIndex),cr.getString(valueIndex));
+			 cursorMap.add(resultCursor);
+			 cr.moveToNext();
+			 } 
+			 return cursorMap;
+	}
+
+	@Override
+	public int update(Uri uri, ContentValues values, String selection,
+			String[] selectionArgs) {
+		// TODO Auto-generated method stub
+		return 0;
+	}
+
+    private String genHash(String input) throws NoSuchAlgorithmException {
+        MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+        byte[] sha1Hash = sha1.digest(input.getBytes());
+        @SuppressWarnings("resource")
+		Formatter formatter = new Formatter();
+        for (byte b : sha1Hash) {
+            formatter.format("%02x", b);
+        }
+        return formatter.toString();
+    }
+
+    
+private class ServerTask extends AsyncTask<ServerSocket, Message, Void> {
+
+    private int count=0;
+
+   	private void Delete_Handler(Uri mUri, Message message) throws NoSuchAlgorithmException {
+      	 if (!message.getKey().equals("*")){
+      		 
+      		  int i=db.delete("Messages","key='"+message.getKey()+"'", null);
+      		  Message msgs=new Message("DeleteResult",myport);
+      		  msgs.setDest_port(message.getmyPort());
+      		  msgs.setDeletecount(i);
+      		  ct.send(msgs);   
+     		     		 
+      	 }
+      	 else{	
+      		 int i=db.delete("Messages","1",null);
+      		 Message messageresp=new Message("DeleteAllResult",myport);
+     	    	 messageresp.setDest_port(message.getmyPort());
+     	    	 messageresp.setDeletecount(i);
+     	    	 ct.send(messageresp);
+     	    	 message.setDest_port(successor1);
+     	    	 ct.send(message);
+      	
+      	 }
+  		   
+  		
+  	}
+      
+       
+       
+       private void Query_Handler(Uri mUri,Message message) throws NoSuchAlgorithmException{
+        Cursor queryCursor=null;
+  		 if (!message.getKey().equals("*")){
+  			rwl.readLock().lock();
+  			 queryCursor=db.query("Messages", null, "key='"+message.getKey()+"'", null, null, null, null);
+   	    	 ArrayList<SerialCursorRow>cursorMap=sendCursor(queryCursor,null);    	  
+    		 Message messageresp=new Message("Result",myport);
+  	    	 messageresp.setDest_port(message.getmyPort());
+  	    	 messageresp.setKey(message.getKey());
+  	    	 messageresp.setCursorMap(cursorMap);
+  	    	rwl.readLock().unlock();
+  	    	 ct.send(messageresp);
+   		 }
+  		 else{
+  			 queryCursor=db.query("Messages", null,null, null, null, null, null);
+  			 if (queryCursor!=null){
+     	         ArrayList<SerialCursorRow>cursorMap=sendCursor(queryCursor,null);    	  
+     	    	 Message messageresp=new Message("Result*",myport);
+     	    	 messageresp.setDest_port(message.getmyPort());
+     	    	 messageresp.setCursorMap(cursorMap);
+     	    	 ct.send(messageresp);
+     	    	 message.setDest_port(successor1);
+     	    	 ct.send(message);
+     	     }
+  		 }
+  		 }
+    	 	 
+       private ArrayList<SerialCursorRow>sendCursor(Cursor cr,String hash) throws NoSuchAlgorithmException{
+      	 ArrayList<SerialCursorRow>cursorMap=new ArrayList<SerialCursorRow>();
+      	 int keyIndex = cr.getColumnIndex("key");
+   		 int valueIndex = cr.getColumnIndex("value");
+   		 int count=cr.getCount();
+   		 cr.moveToFirst();
+  		 for (int i=0;i<count;i++){
+  		     SerialCursorRow resultCursor=new SerialCursorRow(cr.getString(keyIndex),cr.getString(valueIndex));
+  			 cursorMap.add(resultCursor);
+  			 cr.moveToNext();
+  		 }
+  		 return cursorMap;
+      	
+       }
+         
+    
+    
+  @Override
+protected Void doInBackground(ServerSocket... sockets) {
+    ServerSocket serverSocket = sockets[0];
+while(true){
+    Message message = null;
+	  	Socket clientSocket = null;
+	  	ObjectInputStream inSocket = null;
+		try {
+			clientSocket = serverSocket.accept();
+		} catch (IOException e1) {
+			// TODO Auto-generated catch block
+			e1.printStackTrace();
+		}
+		if (clientSocket!=null){
+		try {
+			
+			inSocket = new ObjectInputStream(clientSocket.getInputStream());
+		} 
+		catch (StreamCorruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+		catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} 
+		if (inSocket!=null)
+			try {
+				message = (Message)inSocket.readObject();
+				inSocket.close();
+				clientSocket.close();
+			} catch (OptionalDataException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (ClassNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		
+		if (message!=null && !message.getmyPort().equals(myport)){
+			mUri = buildUri("content", "edu.buffalo.cse.cse486586.simpledht.provider");
+     		Log.e("Msg","Rcvd");	 
+     		
+     		if (message.getMessage().equals("Insert")){
+     			ContentValues cv=new ContentValues();
+     			cv.put("key", message.getKey());
+     			cv.put("value",message.getValue());
+     			rwl.writeLock().lock();
+     			db.insertWithOnConflict("Messages",null ,cv,algo);
+     			rwl.writeLock().unlock();
+     			Log.e("InsertPort",cv.getAsString("key"));
+       		}
+     		
+     		if (message.getMessage().equals("Query")){
+     			try {
+     						
+     				Log.e("Query",message.getKey());
+     				Query_Handler(mUri,message);
+				
+     			} catch (NoSuchAlgorithmException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+     			Log.e("QueryPort",message.getKey());	             			
+       		}
+     		
+     		if (message.getMessage().equals("Delete")){
+     			try {
+     				Log.e("DeletePort",message.getKey());
+     				Delete_Handler(mUri,message);
+     			}catch (NoSuchAlgorithmException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+     		            			
+       		}
+     		if (message.getMessage().equals("DeleteResult")){
+     			Log.e("Count","CountReceived");
+     			synchronized(Count){
+     			Sum=message.getDeletecount();
+     			Count.notify();
+     			}
+     		}
+     		
+     		if (message.getMessage().equals("Result")){
+     			Log.e("Result","AnswerReceived");
+            	ArrayList<SerialCursorRow>cursorMap=message.getCursorMap();
+            	synchronized(answerCursor){
+            		answerCursor.addAll(cursorMap);
+            		Log.e("Notify",myport);
+            		Log.e("Received",message.getKey());
+            		answerCursor.notify();
+        		}
+                 		
+        	 }
+     		
+			if (message.getMessage().equals("Result*")){
+     			Log.e("Result","AnswerReceived");
+            	ArrayList<SerialCursorRow>cursorMap=message.getCursorMap();
+            	synchronized(answerCursor){
+            		answerCursor.addAll(cursorMap);
+             	}
+            	count++;
+            	if (count==neighborMap.size()-1){
+            		synchronized(answerCursor){
+                		Log.e("Notify",myport);
+            			answerCursor.notify();
+                		
+                		count=0;
+                 	}	
+            	}
+                 		
+        	 }
+			
+			
+     		
+			 
+		 }
+		 message=null;
+		 }
+	     }
+         }
+
+         }
+
+ }
